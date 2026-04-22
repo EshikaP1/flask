@@ -258,6 +258,142 @@ class GeminiAPI:
             
             return status_info
 
+    class _LogAnalyzer(Resource):
+        """
+        Log analysis endpoint - POST /api/gemini/analyze-log
+        Analyzes Jekyll build logs using AI.
+        """
+        def post(self):
+            """
+            Analyze a Jekyll build log.
+            
+            Expected JSON body:
+            {
+                "log": "The log content to analyze"
+            }
+            
+            Returns:
+                JSON response with analysis or error message
+            """
+            body = request.get_json()
+            
+            # Validate request body
+            if not body:
+                return {'message': 'Request body is required'}, 400
+            
+            log = body.get('log', '')
+            if not log:
+                return {'message': 'Log field is required'}, 400
+            
+            # Get configuration
+            api_key = app.config.get('GEMINI_API_KEY')
+            server = app.config.get('GEMINI_SERVER')
+            
+            if not api_key:
+                return {'message': 'Gemini API key not configured'}, 500
+            
+            if not server:
+                return {'message': 'Gemini server not configured'}, 500
+            
+            # Build the endpoint URL
+            endpoint = f"{server}?key={api_key}"
+            
+            # System prompt for log analysis
+            system_prompt = """
+You are an AI assistant that analyzes Jekyll build logs.
+
+Your job:
+1. Determine whether the build succeeded or failed.
+2. If it failed, identify the most likely cause.
+3. Recommend what a student should do to fix the build or Makefile.
+4. Do not print the full log contents.
+5. Keep the answer concise and actionable.
+"""
+            
+            # Truncate log to prevent huge inputs
+            log = log[-8000:]
+            
+            # Prepare the request payload for Gemini API
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": f"{system_prompt}\n\n{log}"
+                    }]
+                }]
+            }
+            
+            # Log the request for auditing purposes
+            current_app.logger.info(f"Log analysis request made")
+            
+            try:
+                # Make request to Gemini API
+                response = requests.post(
+                    endpoint,
+                    headers={'Content-Type': 'application/json'},
+                    json=payload,
+                    timeout=90  # 90 second timeout
+                )
+                
+                # Check if the request was successful
+                if response.status_code != 200:
+                    error_details = {
+                        'status_code': response.status_code,
+                        'response_text': response.text,
+                        'endpoint': endpoint,
+                        'headers': dict(response.headers)
+                    }
+                    current_app.logger.error(f"Gemini API error: {error_details}")
+                    
+                    # Handle specific error codes
+                    if response.status_code == 503:
+                        return {
+                            'message': 'Gemini API is temporarily unavailable (503). Please try again later.',
+                            'error_code': 503,
+                            'details': 'The service may be overloaded or under maintenance.'
+                        }, 503
+                    elif response.status_code == 429:
+                        return {
+                            'message': 'Rate limit exceeded. Please try again later.',
+                            'error_code': 429
+                        }, 429
+                    elif response.status_code == 400:
+                        return {
+                            'message': 'Bad request to Gemini API. Please check your input.',
+                            'error_code': 400,
+                            'details': response.text
+                        }, 400
+                    else:
+                        return {
+                            'message': f'Gemini API error: {response.status_code}',
+                            'error_code': response.status_code,
+                            'details': response.text
+                        }, 500
+                
+                # Parse the response
+                result = response.json()
+                
+                # Extract the generated text
+                try:
+                    generated_text = result['candidates'][0]['content']['parts'][0]['text']
+                    return {
+                        'success': True,
+                        'analysis': generated_text.strip()
+                    }
+                except (KeyError, IndexError) as e:
+                    current_app.logger.error(f"Error parsing Gemini response: {e}")
+                    return {
+                        'success': False,
+                        'message': 'Error parsing Gemini API response',
+                        'raw_response': result
+                    }, 500
+                    
+            except requests.RequestException as e:
+                current_app.logger.error(f"Error communicating with Gemini API: {e}")
+                return {'message': f'Error communicating with Gemini API: {str(e)}'}, 500
+            except Exception as e:
+                current_app.logger.error(f"Unexpected error in log analysis: {e}")
+                return {'message': f'Unexpected error: {str(e)}'}, 500
+
     class _Debug(Resource):
         """
         Debug endpoint to help troubleshoot Gemini API issues.
@@ -326,3 +462,4 @@ class GeminiAPI:
     api.add_resource(_Ask, '/gemini')              # Main analysis endpoint
     api.add_resource(_Health, '/gemini/health')    # Health check
     api.add_resource(_Debug, '/gemini/debug')      # Debug/troubleshooting
+    api.add_resource(_LogAnalyzer, '/gemini/analyze-log')  # Log analysis endpoint
